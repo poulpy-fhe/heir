@@ -51,6 +51,17 @@ def Poulpy_ScratchType : Poulpy_Type<"Scratch", "scratch", [MemRefElementTypeInt
   }];
 }
 
+// maps to BackendGLWESecret<BE>
+def Poulpy_SecretType : Poulpy_Type<"Secret", "secret"> {
+  let summary = "A GLWE secret in the coefficient domain";
+  let description = [{
+    The raw secret, used to generate evaluation keys. Encryption and decryption
+    use its prepared form, `!poulpy.secret_key`.
+
+    See https://docs.rs/poulpy-core/latest/poulpy_core/layouts/struct.GLWESecret.html
+  }];
+}
+
 // maps to GLWESecretPrepared<BE::OwnedBuf, BE>
 def Poulpy_SecretKeyType : Poulpy_Type<"SecretKey", "secret_key", [MemRefElementTypeInterface]> {
   let summary = "A DFT-domain prepared GLWE secret key";

@@ -17,7 +17,7 @@
 // CHECK: [[akm:v[0-9]+]]: &Akm<BE>
 // CHECK: [[a:v[0-9]+]]: &Ct<BE>
 // CHECK: [[b:v[0-9]+]]: &Ct<BE>
-// CHECK-NEXT: ) -> Result<Ct<BE>> {
+// CHECK-NEXT: ) -> Result<Ct<BE>> where Module<BE>: PoulpyModule<BE> {
 // CHECK-NEXT: let mut [[sum:v[0-9]+]] = [[m]].ckks_ciphertext_alloc([[a]].base2k(), [[a]].max_k());
 // CHECK-NEXT: [[m]].ckks_add_into(&mut [[sum]], &*[[a]], &*[[b]], &mut [[s]].borrow())?;
 // CHECK-NEXT: [[m]].ckks_mul_assign(&mut [[sum]], &*[[b]], &*[[tsk]], &mut [[s]].borrow())?;
@@ -38,7 +38,7 @@ func.func @chain(%m: !module, %s: !scratch, %tsk: !tsk, %akm: !akm, %a: !ct, %b:
 // CHECK: [[s:v[0-9]+]]: &mut ScratchOwned<BE>
 // CHECK: [[a:v[0-9]+]]: &Ct<BE>
 // CHECK: [[b:v[0-9]+]]: &Ct<BE>
-// CHECK-NEXT: ) -> Result<Ct<BE>> {
+// CHECK-NEXT: ) -> Result<Ct<BE>> where Module<BE>: PoulpyModule<BE> {
 // CHECK-NEXT: let mut [[copy:v[0-9]+]] = [[a]].clone();
 // CHECK-NEXT: [[m]].ckks_add_assign(&mut [[copy]], &*[[b]], &mut [[s]].borrow())?;
 // CHECK-NEXT: Ok([[copy]])
@@ -52,7 +52,7 @@ func.func @assign_on_live_arg(%m: !module, %s: !scratch, %a: !ct, %b: !ct) -> (!
 // CHECK: [[s:v[0-9]+]]: &mut ScratchOwned<BE>
 // CHECK: [[a:v[0-9]+]]: &mut Ct<BE>
 // CHECK: [[b:v[0-9]+]]: &Ct<BE>
-// CHECK-NEXT: ) -> Result<()> {
+// CHECK-NEXT: ) -> Result<()> where Module<BE>: PoulpyModule<BE> {
 // CHECK-NEXT: [[m]].ckks_add_assign(&mut *[[a]], &*[[b]], &mut [[s]].borrow())?;
 // CHECK-NEXT: Ok(())
 func.func @update_arg(%m: !module, %s: !scratch, %a: !ct, %b: !ct) -> !ct {
@@ -66,7 +66,7 @@ func.func @update_arg(%m: !module, %s: !scratch, %a: !ct, %b: !ct) -> !ct {
 // CHECK: [[sk:v[0-9]+]]: &Sk<BE>
 // CHECK: [[re:v[0-9]+]]: &[f64]
 // CHECK: [[im:v[0-9]+]]: &[f64]
-// CHECK-NEXT: ) -> Result<(Vec<f64>, Vec<f64>)> {
+// CHECK-NEXT: ) -> Result<(Vec<f64>, Vec<f64>)> where Module<BE>: PoulpyModule<BE> {
 // CHECK: [[m]].ckks_encode_reim_into(&mut [[pt:v[0-9]+]], &*[[re]], &*[[im]], &mut [[s]].borrow())?;
 // CHECK: [[m]].ckks_encrypt_sk(&mut [[ct:v[0-9]+]], &[[pt]], &*[[sk]],
 // CHECK: [[m]].ckks_decrypt(&mut [[pt2:v[0-9]+]], &[[ct]], &*[[sk]], &mut [[s]].borrow())?;
@@ -92,7 +92,7 @@ func.func @roundtrip(%m: !module, %s: !scratch, %sk: !sk, %re: tensor<4xf64>, %i
 // CHECK: [[s:v[0-9]+]]: &mut ScratchOwned<BE>
 // CHECK: [[a:v[0-9]+]]: &Ct<BE>
 // CHECK: [[pt:v[0-9]+]]: &Pt<BE>
-// CHECK-NEXT: ) -> Result<Ct<BE>> {
+// CHECK-NEXT: ) -> Result<Ct<BE>> where Module<BE>: PoulpyModule<BE> {
 // CHECK-NEXT: let mut [[sum:v[0-9]+]] = [[m]].ckks_ciphertext_alloc([[a]].base2k(), [[a]].max_k());
 // CHECK-NEXT: [[m]].ckks_add_pt_vec_into(&mut [[sum]], &*[[a]], &*[[pt]], &mut [[s]].borrow())?;
 // CHECK-NEXT: [[m]].ckks_neg_assign(&mut [[sum]])?;
