@@ -14,6 +14,7 @@ cc_library(
         ":Patterns",
         ":pass_inc_gen",
         "@heir//lib/Analysis/SecretnessAnalysis",
+        "@heir//lib/Dialect:ModuleAttributes",
         "@heir//lib/Dialect/Kernel/IR:Dialect",
         "@heir//lib/Dialect/Polynomial/IR:Dialect",
         "@heir//lib/Target/CompilationTarget",

@@ -21,6 +21,7 @@ cc_library(
         "@heir//lib/Dialect/Mgmt/IR:Dialect",
         "@heir//lib/Dialect/Mgmt/Transforms:AnnotateMgmt",
         "@heir//lib/Dialect/Secret/IR:Dialect",
+        "@heir//lib/Target/CompilationTarget",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Analysis",
         "@llvm-project//mlir:IR",

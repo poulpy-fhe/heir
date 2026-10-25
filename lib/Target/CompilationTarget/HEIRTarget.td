@@ -9,6 +9,9 @@ class CompilationTarget<string name> {
   // Whether ciphertext-plaintext operations require equal modulus-chain levels.
   int requiresMatchingCiphertextPlaintextLevels = 0;
   int supportsAdjustScale = 1;
+  // Whether relinearization may be delayed past other operations, e.g. to
+  // relinearize a sum of products once.
+  int supportsLazyRelinearization = 1;
 }
 
 #endif // LIB_TARGET_COMPILATIONTARGET_HEIRTARGET_TD_

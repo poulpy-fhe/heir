@@ -10,11 +10,13 @@ namespace heir {
 #include "lib/Target/Cheddar/cheddar_backend_config.cpp.inc"
 #include "lib/Target/Lattigo/lattigo_backend_config.cpp.inc"
 #include "lib/Target/OpenFhePke/openfhe_backend_config.cpp.inc"
+#include "lib/Target/Poulpy/poulpy_backend_config.cpp.inc"
 
 void registerAllBackends() {
   registerTargetCheddar();
   registerTargetLattigo();
   registerTargetOpenFHE();
+  registerTargetPoulpy();
 }
 
 }  // namespace heir

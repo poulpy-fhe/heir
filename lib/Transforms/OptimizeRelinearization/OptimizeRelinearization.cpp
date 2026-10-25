@@ -9,6 +9,7 @@
 #include "lib/Dialect/Mgmt/Transforms/AnnotateMgmt.h"
 #include "lib/Dialect/ModuleAttributes.h"
 #include "lib/Dialect/Secret/IR/SecretOps.h"
+#include "lib/Target/CompilationTarget/CompilationTarget.h"
 #include "llvm/include/llvm/Support/Debug.h"               // from @llvm-project
 #include "mlir/include/mlir/Analysis/DataFlow/Utils.h"     // from @llvm-project
 #include "mlir/include/mlir/Analysis/DataFlowFramework.h"  // from @llvm-project
@@ -67,6 +68,17 @@ struct OptimizeRelinearization
 
   void runOnOperation() override {
     Operation* module = getOperation();
+
+    // A target whose multiplication always relinearizes needs each
+    // relinearization right after its multiplication, where
+    // secret-insert-mgmt placed it.
+    auto moduleOp = dyn_cast<ModuleOp>(module);
+    if (!moduleOp) moduleOp = module->getParentOfType<ModuleOp>();
+    if (moduleHasBackend(moduleOp)) {
+      FailureOr<CompilationTarget> target = getTargetConfig(moduleOp);
+      if (failed(target)) return signalPassFailure();
+      if (!target->supportsLazyRelinearization) return;
+    }
 
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);

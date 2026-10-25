@@ -4,6 +4,7 @@
 
 #include "lib/Analysis/SecretnessAnalysis/SecretnessAnalysis.h"
 #include "lib/Dialect/Kernel/IR/KernelDialect.h"
+#include "lib/Dialect/ModuleAttributes.h"
 #include "lib/Target/CompilationTarget/CompilationTarget.h"
 #include "lib/Transforms/LowerPolynomialEval/Patterns.h"
 #include "mlir/include/mlir/Analysis/DataFlow/Utils.h"  // from @llvm-project
@@ -21,17 +22,6 @@ namespace heir {
 #define GEN_PASS_DEF_LOWERPOLYNOMIALEVAL
 #include "lib/Transforms/LowerPolynomialEval/LowerPolynomialEval.h.inc"
 
-static bool hasBackendAttribute(ModuleOp module) {
-  if (!module) return false;
-  for (NamedAttribute attr : module->getAttrs()) {
-    if (!isa<UnitAttr>(attr.getValue())) continue;
-    if (attr.getName().strref().starts_with("backend.")) {
-      return true;
-    }
-  }
-  return false;
-}
-
 struct LowerPolynomialEval
     : impl::LowerPolynomialEvalBase<LowerPolynomialEval> {
   using LowerPolynomialEvalBase::LowerPolynomialEvalBase;
@@ -45,7 +35,7 @@ struct LowerPolynomialEval
     }
 
     bool hasKernelChebyshev = false;
-    if (module && hasBackendAttribute(module)) {
+    if (moduleHasBackend(module)) {
       auto target = getTargetConfig(module);
       if (succeeded(target)) {
         hasKernelChebyshev = target->hasKernelChebyshev;

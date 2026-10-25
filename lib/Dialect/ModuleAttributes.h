@@ -56,16 +56,22 @@ constexpr const static ::llvm::StringLiteral kLattigoBackendAttrName =
     "backend.lattigo";
 constexpr const static ::llvm::StringLiteral kCheddarBackendAttrName =
     "backend.cheddar";
+constexpr const static ::llvm::StringLiteral kPoulpyBackendAttrName =
+    "backend.poulpy";
 
 bool moduleIsOpenfhe(Operation* moduleOp);
 bool moduleIsLattigo(Operation* moduleOp);
 bool moduleIsCheddar(Operation* moduleOp);
+bool moduleIsPoulpy(Operation* moduleOp);
+// Whether the module carries any backend.* annotation.
+bool moduleHasBackend(Operation* moduleOp);
 
 void moduleClearBackend(Operation* moduleOp);
 
 void moduleSetOpenfhe(Operation* moduleOp);
 void moduleSetLattigo(Operation* moduleOp);
 void moduleSetCheddar(Operation* moduleOp);
+void moduleSetPoulpy(Operation* moduleOp);
 
 // A function's client/server interface metadata lives in one dictionary:
 // heir.interface = {func_name = "foo", roles = ["entry", "server.evaluate"],

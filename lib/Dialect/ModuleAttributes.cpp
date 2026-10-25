@@ -160,10 +160,25 @@ bool moduleIsCheddar(Operation* moduleOp) {
          nullptr;
 }
 
+bool moduleIsPoulpy(Operation* moduleOp) {
+  return moduleOp->getAttrOfType<mlir::UnitAttr>(kPoulpyBackendAttrName) !=
+         nullptr;
+}
+
+bool moduleHasBackend(Operation* moduleOp) {
+  if (!moduleOp) return false;
+  for (NamedAttribute attr : moduleOp->getAttrs()) {
+    if (!isa<UnitAttr>(attr.getValue())) continue;
+    if (attr.getName().strref().starts_with("backend.")) return true;
+  }
+  return false;
+}
+
 void moduleClearBackend(Operation* moduleOp) {
   moduleOp->removeAttr(kOpenfheBackendAttrName);
   moduleOp->removeAttr(kLattigoBackendAttrName);
   moduleOp->removeAttr(kCheddarBackendAttrName);
+  moduleOp->removeAttr(kPoulpyBackendAttrName);
 }
 
 void moduleSetOpenfhe(Operation* moduleOp) {
@@ -181,6 +196,12 @@ void moduleSetLattigo(Operation* moduleOp) {
 void moduleSetCheddar(Operation* moduleOp) {
   moduleClearBackend(moduleOp);
   moduleOp->setAttr(kCheddarBackendAttrName,
+                    mlir::UnitAttr::get(moduleOp->getContext()));
+}
+
+void moduleSetPoulpy(Operation* moduleOp) {
+  moduleClearBackend(moduleOp);
+  moduleOp->setAttr(kPoulpyBackendAttrName,
                     mlir::UnitAttr::get(moduleOp->getContext()));
 }
 
