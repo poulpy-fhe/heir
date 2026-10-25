@@ -21,6 +21,7 @@ def AnnotateModule : Pass<"annotate-module"> {
       - `openfhe`
       - `lattigo`
       - `cheddar`
+      - `poulpy`
 
     (* example filepath=tests/Transforms/annotate_module/pass.mlir *)
   }];

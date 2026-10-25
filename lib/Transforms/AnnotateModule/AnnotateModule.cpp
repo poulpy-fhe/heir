@@ -52,6 +52,9 @@ struct AnnotateModule : impl::AnnotateModuleBase<AnnotateModule> {
         case BackendName::Cheddar:
           moduleSetCheddar(module);
           break;
+        case BackendName::Poulpy:
+          moduleSetPoulpy(module);
+          break;
       }
     }
   }

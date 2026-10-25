@@ -39,6 +39,7 @@ td_library(
         "@heir//lib/Target/Cheddar:cheddar_backend_config_td",
         "@heir//lib/Target/Lattigo:lattigo_backend_config_td",
         "@heir//lib/Target/OpenFhePke:openfhe_backend_config_td",
+        "@heir//lib/Target/Poulpy:poulpy_backend_config_td",
     ],
 )
 
@@ -75,6 +76,7 @@ cc_library(
         "@heir//lib/Target/Cheddar:cheddar_backend_config",
         "@heir//lib/Target/Lattigo:lattigo_backend_config",
         "@heir//lib/Target/OpenFhePke:openfhe_backend_config",
+        "@heir//lib/Target/Poulpy:poulpy_backend_config",
     ],
 )
 

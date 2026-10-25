@@ -88,6 +88,8 @@ bool emitCompilationTargetRegistration(const llvm::RecordKeeper& records,
     auto requiresMatchingCiphertextPlaintextLevels =
         target->getValueAsInt("requiresMatchingCiphertextPlaintextLevels");
     auto supportsAdjustScale = target->getValueAsInt("supportsAdjustScale");
+    auto supportsLazyRelinearization =
+        target->getValueAsInt("supportsLazyRelinearization");
 
     os << "void registerTarget" << name << "() {\n"
        << "  "
@@ -96,7 +98,7 @@ bool emitCompilationTargetRegistration(const llvm::RecordKeeper& records,
        << name << ", " << bootstrapLevelsConsumed << ", " << hasKernelChebyshev
        << ", " << hasKernelLinearTransform << ", "
        << requiresMatchingCiphertextPlaintextLevels << ", "
-       << supportsAdjustScale << "});\n"
+       << supportsAdjustScale << ", " << supportsLazyRelinearization << "});\n"
        << "}\n\n";
   }
   return false;
