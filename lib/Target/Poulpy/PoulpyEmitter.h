@@ -50,6 +50,9 @@ class PoulpyEmitter {
   LogicalResult checkPendingState(Value dst, Operation* op,
                                   bool shouldBePending);
 
+  // Emits a fresh `Source` and returns its name.
+  std::string emitSource();
+
   void emitCall(Value module, StringRef rustFn, Value dst,
                 ArrayRef<std::string> args, Value scratch = {});
 
@@ -71,6 +74,11 @@ class PoulpyEmitter {
   LogicalResult printOperation(memref::CopyOp op);
   LogicalResult printOperation(ModuleCreateOp op);
   LogicalResult printOperation(ScratchAllocOp op);
+  LogicalResult printOperation(ScratchAllocForAllOpsOp op);
+  LogicalResult printOperation(SecretGenerateOp op);
+  LogicalResult printOperation(SecretKeyPrepareOp op);
+  LogicalResult printOperation(TensorKeyGenerateOp op);
+  LogicalResult printOperation(AutomorphismKeysGenerateOp op);
   LogicalResult printOperation(AddOp op);
   LogicalResult printOperation(AddAssignOp op);
   LogicalResult printOperation(SubOp op);

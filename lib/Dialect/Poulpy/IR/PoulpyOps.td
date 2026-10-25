@@ -86,6 +86,104 @@ def Poulpy_ScratchAllocOp : Poulpy_Op<"scratch_alloc", [Pure]> {
   let results = (outs Poulpy_ScratchType:$scratch);
 }
 
+// maps to ScratchOwned::<BE>::alloc(module.ckks_all_ops_with_atk_tmp_bytes(..))
+def Poulpy_ScratchAllocForAllOpsOp : Poulpy_Op<"scratch_alloc_for_all_ops", [Pure]> {
+  let summary = "Allocate a scratch arena large enough for every CKKS op and key generation";
+  let description = [{
+    Sizes the arena for ciphertexts of width `k` at scale `2^logDelta` and for
+    evaluation keys with the layout of `poulpy.tensor_key_generate`.
+
+    See https://docs.rs/poulpy-ckks/latest/poulpy_ckks/api/trait.CKKSAllOpsTmpBytes.html
+  }];
+  let arguments = (ins
+    Poulpy_ModuleType:$module,
+    I64Attr:$base2k,
+    I64Attr:$k,
+    I64Attr:$kAux,
+    I64Attr:$dsize,
+    I64Attr:$logDelta
+  );
+  let results = (outs Poulpy_ScratchType:$scratch);
+}
+
+// The key generation ops below draw randomness, so they are not Pure.
+
+// maps to module.glwe_secret_alloc + module.glwe_secret_fill_ternary_{prob,hw}
+def Poulpy_SecretGenerateOp : Poulpy_Op<"secret_generate"> {
+  let summary = "Sample a rank-1 ternary GLWE secret";
+  let description = [{
+    Without `hw`, each coefficient is uniform in `{-1, 0, 1}`, the distribution
+    HEIR's RLWE security tables assume. With `hw`, the secret has exactly `hw`
+    non-zero coefficients.
+
+    See https://docs.rs/poulpy-core/latest/poulpy_core/layouts/trait.GLWESecretSampling.html
+  }];
+  let arguments = (ins
+    Poulpy_ModuleType:$module,
+    OptionalAttr<I64Attr>:$hw
+  );
+  let results = (outs Poulpy_SecretType:$secret);
+}
+
+// maps to module.glwe_secret_prepared_alloc + module.glwe_secret_prepare
+def Poulpy_SecretKeyPrepareOp : Poulpy_Op<"secret_key_prepare", [Pure]> {
+  let summary = "Prepare a secret for encryption and decryption";
+  let description = [{
+    See https://docs.rs/poulpy-core/latest/poulpy_core/layouts/prepared/trait.GLWESecretPreparedFactory.html
+  }];
+  let arguments = (ins
+    Poulpy_ModuleType:$module,
+    Poulpy_SecretType:$secret
+  );
+  let results = (outs Poulpy_SecretKeyType:$secret_key);
+}
+
+// maps to module.glwe_tensor_key_encrypt_sk + module.prepare_tensor_key
+def Poulpy_TensorKeyGenerateOp : Poulpy_Op<"tensor_key_generate"> {
+  let summary = "Generate and prepare the tensor (relinearization) key";
+  let description = [{
+    The key relinearizes products of ciphertexts of width up to `k`. Its gadget
+    has digits of `dsize` limbs of `base2k` bits and `kAux` auxiliary bits. Use
+    the ciphertexts' `base2k` so that `poulpy.mul` takes Poulpy's one-pass
+    multiply-relinearize.
+
+    See https://docs.rs/poulpy-core/latest/poulpy_core/api/trait.GLWETensorKeyEncryptSk.html
+  }];
+  let arguments = (ins
+    Poulpy_ModuleType:$module,
+    Poulpy_SecretType:$secret,
+    Poulpy_ScratchType:$scratch,
+    I64Attr:$base2k,
+    I64Attr:$k,
+    I64Attr:$kAux,
+    I64Attr:$dsize
+  );
+  let results = (outs Poulpy_TensorKeyType:$tensor_key);
+}
+
+// maps to module.glwe_automorphism_key_encrypt_sk + module.glwe_automorphism_key_prepare
+def Poulpy_AutomorphismKeysGenerateOp : Poulpy_Op<"automorphism_keys_generate"> {
+  let summary = "Generate and prepare the automorphism keys of the given rotations";
+  let description = [{
+    Generates one key per rotation and stores it under the Galois element
+    `module.ckks_galois_element(rotation)`, the element `poulpy.rotate` looks
+    up. The keys have the same layout as `poulpy.tensor_key_generate`.
+
+    See https://docs.rs/poulpy-core/latest/poulpy_core/api/trait.GLWEAutomorphismKeyEncryptSk.html
+  }];
+  let arguments = (ins
+    Poulpy_ModuleType:$module,
+    Poulpy_SecretType:$secret,
+    Poulpy_ScratchType:$scratch,
+    I64Attr:$base2k,
+    I64Attr:$k,
+    I64Attr:$kAux,
+    I64Attr:$dsize,
+    DenseI64ArrayAttr:$rotations
+  );
+  let results = (outs Poulpy_AutomorphismKeyMapType:$keys);
+}
+
 // maps to module.ckks_pt_vec_alloc + pt.set_meta + module.ckks_encode_reim_into
 def Poulpy_EncodeOp : Poulpy_DpsOp<"encode", [], "Plaintext"> {
   let summary = "Encode real and imaginary slot vectors into a plaintext";

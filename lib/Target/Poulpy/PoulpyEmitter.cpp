@@ -19,8 +19,8 @@ namespace poulpy {
 
 namespace {
 // The emitted code is generic over the backend: a function whose signature
-// carries a poulpy value takes `<BE: PoulpyBackend>`, and calls infer `BE` from
-// their arguments.
+// carries a poulpy value takes `<BE: PoulpyBackend>` and requires
+// `Module<BE>: PoulpyModule<BE>`, and calls infer `BE` from their arguments.
 bool isGenericOverBackend(func::FuncOp funcOp) {
   auto isPoulpyType = [](Type type) {
     if (auto memRefType = dyn_cast<MemRefType>(type))
@@ -52,6 +52,21 @@ std::string refMut(Value value, SelectVariableNames* variableNames) {
   auto expression = variableNames->getNameForValue(value);
   return isa<BlockArgument>(value) ? "&mut *" + expression
                                    : "&mut " + expression;
+}
+
+// A rank-1 gadget key layout (tensor or automorphism key) for ciphertexts of
+// width `k`, with `dsize` limbs per digit and `kAux` auxiliary bits.
+std::string keyLayout(StringRef layoutType, StringRef moduleName,
+                      int64_t base2k, int64_t k, int64_t kAux, int64_t dsize) {
+  return llvm::formatv(
+             "{0} {{ n: {1}.n().into(), base2k: Base2K({2}u32), dnum: "
+             "GGLWELayout::dnum_for_input(Base2K({2}u32), "
+             "TorusPrecision({3}u32), "
+             "Dsize({5}u32)), k_aux: TorusPrecision({4}u32), rank: Rank(1), "
+             "dsize: "
+             "Dsize({5}u32) }",
+             layoutType, moduleName, base2k, k, kAux, dsize)
+      .str();
 }
 }  // namespace
 
@@ -92,8 +107,10 @@ LogicalResult PoulpyEmitter::translate(Operation& op) {
                 MulPtVecAssignOp, NegOp, NegAssignOp, RotateOp, RotateAssignOp,
                 MulPow2Op, MulPow2AssignOp, DivPow2Op, DivPow2AssignOp,
                 CompactLimbsOp, EncodeOp, DecodeOp, EncryptOp, DecryptOp,
-                ModuleCreateOp, ScratchAllocOp, memref::AllocOp,
-                memref::CopyOp>([&](auto op) { return printOperation(op); })
+                ModuleCreateOp, ScratchAllocOp, ScratchAllocForAllOpsOp,
+                SecretGenerateOp, SecretKeyPrepareOp, TensorKeyGenerateOp,
+                AutomorphismKeysGenerateOp, memref::AllocOp, memref::CopyOp>(
+              [&](auto op) { return printOperation(op); })
           .Default([&](Operation& op) {
             return op.emitOpError("unable to find printer for op");
           });
@@ -171,8 +188,9 @@ LogicalResult PoulpyEmitter::printOperation(ModuleOp moduleOp) {
 LogicalResult PoulpyEmitter::printOperation(func::FuncOp funcOp) {
   computeMutatedValues(funcOp);
   sourceCounter = 0;
+  bool isGeneric = isGenericOverBackend(funcOp);
   os << "pub fn " << funcOp.getName();
-  if (isGenericOverBackend(funcOp)) os << "<BE: PoulpyBackend>";
+  if (isGeneric) os << "<BE: PoulpyBackend>";
   os << "(\n";
   os.indent();
   for (Value arg : funcOp.getArguments()) {
@@ -205,7 +223,9 @@ LogicalResult PoulpyEmitter::printOperation(func::FuncOp funcOp) {
     os << "(" << *types << ")";
   }
 
-  os << "> {\n";
+  os << ">";
+  if (isGeneric) os << " where Module<BE>: PoulpyModule<BE>";
+  os << " {\n";
   os.indent();
   for (Block& block : funcOp.getBlocks()) {
     if (failed(translateBlock(block))) {
@@ -530,22 +550,13 @@ LogicalResult PoulpyEmitter::printOperation(EncryptOp encryptOp) {
      << ".ckks_ciphertext_alloc(Base2K(" << base2k << "u32), TorusPrecision("
      << ctK << "u32));\n";
 
-  // TODO(mmoro): These seeds are deterministic placeholders, not real
-  // randomness. Thread a real CSPRNG seed once a client-interface pass
-  // exists to supply one.
-  os << "let mut source" << sourceCounter << " = Source::new([" << sourceCounter
-     << "u8; 32]);\n";
-  os << "let mut source" << (sourceCounter + 1) << " = Source::new(["
-     << (sourceCounter + 1) << "u8; 32]);\n";
-
-  emitCall(module, "ckks_encrypt_sk", ciphertext,
-           {ref(encryptOp.getPlaintext(), variableNames),
-            ref(secretKey, variableNames),
-            "&mut source" + std::to_string(sourceCounter),
-            "&mut source" + std::to_string(sourceCounter + 1)},
-           encryptOp.getScratch());
-
-  sourceCounter += 2;
+  std::string sourceXe = emitSource();
+  std::string sourceXa = emitSource();
+  emitCall(
+      module, "ckks_encrypt_sk", ciphertext,
+      {ref(encryptOp.getPlaintext(), variableNames),
+       ref(secretKey, variableNames), "&mut " + sourceXe, "&mut " + sourceXa},
+      encryptOp.getScratch());
 
   return success();
 }
@@ -583,6 +594,131 @@ LogicalResult PoulpyEmitter::printOperation(ScratchAllocOp scratchAllocOp) {
      << variableNames->getNameForValue(scratchAllocOp.getScratch())
      << " = ScratchOwned::<BE>::alloc(" << scratchAllocOp.getSize()
      << "usize);\n";
+  return success();
+}
+
+// TODO(mmoro): These seeds are deterministic placeholders, not real
+// randomness. Thread a real CSPRNG seed once a client-interface pass
+// exists to supply one.
+std::string PoulpyEmitter::emitSource() {
+  std::string name = "source" + std::to_string(sourceCounter);
+  os << "let mut " << name << " = Source::new([" << sourceCounter
+     << "u8; 32]);\n";
+  ++sourceCounter;
+  return name;
+}
+
+LogicalResult PoulpyEmitter::printOperation(ScratchAllocForAllOpsOp op) {
+  auto moduleName = variableNames->getNameForValue(op.getModule());
+  auto scratchName = variableNames->getNameForValue(op.getScratch());
+  int64_t base2k = op.getBase2k();
+  int64_t k = op.getK();
+
+  os << "let " << scratchName << "_tsk_layout = "
+     << keyLayout("GLWETensorKeyLayout", moduleName, base2k, k, op.getKAux(),
+                  op.getDsize())
+     << ";\n";
+  os << "let " << scratchName << "_atk_layout = "
+     << keyLayout("GLWEAutomorphismKeyLayout", moduleName, base2k, k,
+                  op.getKAux(), op.getDsize())
+     << ";\n";
+  os << "let " << scratchName
+     << "_ct_layout = CKKSLayout { glwe_layout: GLWELayout { n: " << moduleName
+     << ".n().into(), base2k: Base2K(" << base2k << "u32), k: TorusPrecision("
+     << k << "u32), rank: Rank(1) }, meta: CKKSMeta { log_delta: "
+     << op.getLogDelta()
+     << "usize, log_sparsity: 0usize, slots: SlotsKind::Complex } };\n";
+  os << "let mut " << scratchName << " = ScratchOwned::<BE>::alloc("
+     << moduleName << ".ckks_all_ops_with_atk_tmp_bytes(&" << scratchName
+     << "_ct_layout, &" << scratchName << "_tsk_layout, &" << scratchName
+     << "_atk_layout, &" << scratchName << "_ct_layout));\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(SecretGenerateOp op) {
+  auto moduleName = variableNames->getNameForValue(op.getModule());
+  auto secretName = variableNames->getNameForValue(op.getSecret());
+  std::string source = emitSource();
+  os << "let mut " << secretName << " = " << moduleName
+     << ".glwe_secret_alloc(Rank(1));\n";
+  if (std::optional<uint64_t> hw = op.getHw()) {
+    os << moduleName << ".glwe_secret_fill_ternary_hw(&mut " << secretName
+       << ", " << *hw << "usize, &mut " << source << ");\n";
+  } else {
+    os << moduleName << ".glwe_secret_fill_ternary_prob(&mut " << secretName
+       << ", 2.0 / 3.0, &mut " << source << ");\n";
+  }
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(SecretKeyPrepareOp op) {
+  auto moduleName = variableNames->getNameForValue(op.getModule());
+  auto secretKeyName = variableNames->getNameForValue(op.getSecretKey());
+  os << "let mut " << secretKeyName << " = " << moduleName
+     << ".glwe_secret_prepared_alloc(Rank(1));\n";
+  os << moduleName << ".glwe_secret_prepare(&mut " << secretKeyName << ", "
+     << ref(op.getSecret(), variableNames) << ");\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(TensorKeyGenerateOp op) {
+  auto moduleName = variableNames->getNameForValue(op.getModule());
+  auto keyName = variableNames->getNameForValue(op.getTensorKey());
+  auto scratchName = variableNames->getNameForValue(op.getScratch());
+  os << "let " << keyName << "_layout = "
+     << keyLayout("GLWETensorKeyLayout", moduleName, op.getBase2k(), op.getK(),
+                  op.getKAux(), op.getDsize())
+     << ";\n";
+  std::string sourceXe = emitSource();
+  std::string sourceXa = emitSource();
+  os << "let mut " << keyName << "_raw = " << moduleName
+     << ".glwe_tensor_key_alloc_from_infos(&" << keyName << "_layout);\n";
+  os << moduleName << ".glwe_tensor_key_encrypt_sk(&mut " << keyName << "_raw, "
+     << ref(op.getSecret(), variableNames) << ", &mut " << sourceXe << ", &mut "
+     << sourceXa << ", &mut " << scratchName << ".borrow());\n";
+  os << "let mut " << keyName << " = " << moduleName
+     << ".alloc_tensor_key_prepared_from_infos(&" << keyName << "_layout);\n";
+  os << moduleName << ".prepare_tensor_key(&mut " << keyName << ", &" << keyName
+     << "_raw, &mut " << scratchName << ".borrow());\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(AutomorphismKeysGenerateOp op) {
+  auto moduleName = variableNames->getNameForValue(op.getModule());
+  auto keysName = variableNames->getNameForValue(op.getKeys());
+  auto scratchName = variableNames->getNameForValue(op.getScratch());
+  os << "let mut " << keysName << ": Akm<BE> = HashMap::new();\n";
+  ArrayRef<int64_t> rotations = op.getRotations();
+  if (rotations.empty()) return success();
+
+  os << "let " << keysName << "_layout = "
+     << keyLayout("GLWEAutomorphismKeyLayout", moduleName, op.getBase2k(),
+                  op.getK(), op.getKAux(), op.getDsize())
+     << ";\n";
+  std::string sourceXe = emitSource();
+  std::string sourceXa = emitSource();
+  os << "for rotation in ["
+     << llvm::join(
+            llvm::map_range(
+                rotations, [](int64_t r) { return std::to_string(r) + "i64"; }),
+            ", ")
+     << "] {\n";
+  os.indent();
+  os << "let p = " << moduleName << ".ckks_galois_element(rotation);\n";
+  os << "let mut raw = " << moduleName
+     << ".glwe_automorphism_key_alloc_from_infos(&" << keysName
+     << "_layout);\n";
+  os << moduleName << ".glwe_automorphism_key_encrypt_sk(&mut raw, p, "
+     << ref(op.getSecret(), variableNames) << ", &mut " << sourceXe << ", &mut "
+     << sourceXa << ", &mut " << scratchName << ".borrow());\n";
+  os << "let mut prepared = " << moduleName
+     << ".glwe_automorphism_key_prepared_alloc_from_infos(&" << keysName
+     << "_layout);\n";
+  os << moduleName << ".glwe_automorphism_key_prepare(&mut prepared, &raw, "
+     << "&mut " << scratchName << ".borrow());\n";
+  os << keysName << ".insert(p, prepared);\n";
+  os.unindent();
+  os << "}\n";
   return success();
 }
 
@@ -646,15 +782,18 @@ FailureOr<std::string> PoulpyEmitter::convertType(Type type, bool isArg,
         }
         return failure();
       })
+      .Case<SecretType>([&](SecretType) -> FailureOr<std::string> {
+        return std::string(isArg ? "&Secret<BE>" : "Secret<BE>");
+      })
       .Case<SecretKeyType>([&](SecretKeyType) -> FailureOr<std::string> {
-        return std::string("&Sk<BE>");
+        return std::string(isArg ? "&Sk<BE>" : "Sk<BE>");
       })
       .Case<TensorKeyType>([&](TensorKeyType) -> FailureOr<std::string> {
-        return std::string("&Tsk<BE>");
+        return std::string(isArg ? "&Tsk<BE>" : "Tsk<BE>");
       })
       .Case<AutomorphismKeyMapType>(
           [&](AutomorphismKeyMapType) -> FailureOr<std::string> {
-            return std::string("&Akm<BE>");
+            return std::string(isArg ? "&Akm<BE>" : "Akm<BE>");
           })
       .Default([&](Type&) { return failure(); });
 }

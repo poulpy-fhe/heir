@@ -27,6 +27,21 @@ module {
     return
   }
 
+  // CHECK: func @test_keygen
+  func.func @test_keygen(%mod: !module) -> (!sk, !tk, !akm, !scratch) {
+    // CHECK: poulpy.scratch_alloc_for_all_ops
+    %scratch = poulpy.scratch_alloc_for_all_ops %mod <base2k = 52, k = 156, kAux = 52, dsize = 1, logDelta = 45> : (!module) -> !scratch
+    // CHECK: poulpy.secret_generate
+    %secret = poulpy.secret_generate %mod <hw = 192> : (!module) -> !poulpy.secret
+    // CHECK: poulpy.secret_key_prepare
+    %sk = poulpy.secret_key_prepare %mod, %secret : (!module, !poulpy.secret) -> !sk
+    // CHECK: poulpy.tensor_key_generate
+    %tk = poulpy.tensor_key_generate %mod, %secret, %scratch <base2k = 52, k = 156, kAux = 52, dsize = 1> : (!module, !poulpy.secret, !scratch) -> !tk
+    // CHECK: poulpy.automorphism_keys_generate
+    %akm = poulpy.automorphism_keys_generate %mod, %secret, %scratch <base2k = 52, k = 156, kAux = 52, dsize = 1, rotations = [1, -1]> : (!module, !poulpy.secret, !scratch) -> !akm
+    return %sk, %tk, %akm, %scratch : !sk, !tk, !akm, !scratch
+  }
+
   // CHECK: func @test_types
   // Exercises MemRefElementTypeInterface on ciphertext and plaintext.
   func.func @test_types(
