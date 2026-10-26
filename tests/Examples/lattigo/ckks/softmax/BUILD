@@ -12,7 +12,7 @@ heir_lattigo_lib(
         "--torch-linalg-to-ckks=min-slot-count=1024 first-mod-bits=60 greedy-level-budget=20",
         "--scheme-to-lattigo",
     ],
-    mlir_src = "softmax.mlir",
+    mlir_src = "@heir//tests/Examples/common:softmax.mlir",
 )
 
 go_test(

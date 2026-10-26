@@ -17,9 +17,11 @@
 #include "llvm/include/llvm/Support/FormatVariadic.h"   // from @llvm-project
 #include "mlir/include/mlir/Dialect/Arith/IR/Arith.h"   // from @llvm-project
 #include "mlir/include/mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
-#include "mlir/include/mlir/Dialect/SCF/IR/SCF.h"       // from @llvm-project
-#include "mlir/include/mlir/IR/Builders.h"              // from @llvm-project
-#include "mlir/include/mlir/IR/SymbolTable.h"           // from @llvm-project
+#include "mlir/include/mlir/Dialect/Math/IR/Math.h"     // from @llvm-project
+#include "mlir/include/mlir/Dialect/MemRef/Utils/MemRefUtils.h"  // from @llvm-project
+#include "mlir/include/mlir/Dialect/SCF/IR/SCF.h"  // from @llvm-project
+#include "mlir/include/mlir/IR/Builders.h"         // from @llvm-project
+#include "mlir/include/mlir/IR/SymbolTable.h"      // from @llvm-project
 #include "mlir/include/mlir/Tools/mlir-translate/Translation.h"  // from @llvm-project
 #define DEBUG_TYPE "poulpy-emitter"
 
@@ -95,6 +97,24 @@ std::string linearIndex(MemRefType type, ValueRange indices,
   return terms.empty() ? "0" : llvm::join(terms, " + ");
 }
 
+// The buffer that a chain of memref.subview ops selects from.
+Value rootBuffer(Value value) {
+  while (auto subview = value.getDefiningOp<memref::SubViewOp>())
+    value = subview.getSource();
+  return value;
+}
+
+// The Rust place of a value: its name or, for a contiguous subview, the range
+// of the underlying vector it selects.
+std::string place(Value value, SelectVariableNames* variableNames) {
+  std::string name = variableNames->getNameForValue(rootBuffer(value));
+  auto subview = value.getDefiningOp<memref::SubViewOp>();
+  if (!subview) return name;
+  int64_t offset = subview.getType().getStridesAndOffset().second;
+  return llvm::formatv("{0}[{1}..{2}]", name, offset,
+                       offset + subview.getType().getNumElements());
+}
+
 std::string valueOrClonedValue(Value value,
                                SelectVariableNames* variableNames) {
   auto expression = variableNames->getNameForValue(value);
@@ -106,12 +126,12 @@ std::string valueOrClonedValue(Value value,
 }
 
 std::string ref(Value value, SelectVariableNames* variableNames) {
-  auto expression = variableNames->getNameForValue(value);
+  auto expression = place(value, variableNames);
   return isa<BlockArgument>(value) ? "&*" + expression : "&" + expression;
 }
 
 std::string refMut(Value value, SelectVariableNames* variableNames) {
-  auto expression = variableNames->getNameForValue(value);
+  auto expression = place(value, variableNames);
   return isa<BlockArgument>(value) ? "&mut *" + expression
                                    : "&mut " + expression;
 }
@@ -139,10 +159,10 @@ void registerToPoulpyTranslation() {
         return translateToPoulpy(op, output);
       },
       [](DialectRegistry& registry) {
-        registry
-            .insert<arith::ArithDialect, ckks::CKKSDialect, func::FuncDialect,
-                    memref::MemRefDialect, poulpy::PoulpyDialect,
-                    scf::SCFDialect, tensor_ext::TensorExtDialect>();
+        registry.insert<arith::ArithDialect, ckks::CKKSDialect,
+                        func::FuncDialect, math::MathDialect,
+                        memref::MemRefDialect, poulpy::PoulpyDialect,
+                        scf::SCFDialect, tensor_ext::TensorExtDialect>();
       });
 }
 
@@ -175,8 +195,12 @@ LogicalResult PoulpyEmitter::translate(Operation& op) {
                 SecretGenerateOp, SecretKeyPrepareOp, TensorKeyGenerateOp,
                 AutomorphismKeysGenerateOp, memref::AllocOp, memref::CopyOp,
                 memref::GetGlobalOp, memref::LoadOp, memref::StoreOp,
-                scf::ForOp, arith::ConstantOp>(
+                memref::SubViewOp, scf::ForOp, scf::IfOp, arith::ConstantOp>(
               [&](auto op) { return printOperation(op); })
+          .Case<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::RemSIOp,
+                arith::FloorDivSIOp, arith::CmpIOp, arith::AddFOp,
+                arith::SubFOp, arith::MulFOp, arith::DivFOp, math::SqrtOp>(
+              [&](auto op) { return printScalarOp(op); })
           .Case<arith::ExtFOp, arith::TruncFOp, arith::IndexCastOp>(
               [&](auto op) { return printCast(op); })
           // Globals are inlined where they are read.
@@ -214,24 +238,35 @@ void PoulpyEmitter::computeMutatedValues(func::FuncOp funcOp) {
             [&](EncryptOp op) { mutatedValues.insert(op.getCiphertext()); })
         .Case<DecryptOp>(
             [&](DecryptOp op) { mutatedValues.insert(op.getPlaintext()); })
-        .Case<memref::StoreOp>(
-            [&](memref::StoreOp op) { mutatedValues.insert(op.getMemRef()); })
-        .Case<memref::CopyOp>(
-            [&](memref::CopyOp op) { mutatedValues.insert(op.getTarget()); })
+        .Case<memref::StoreOp>([&](memref::StoreOp op) {
+          mutatedValues.insert(rootBuffer(op.getMemRef()));
+        })
+        .Case<memref::CopyOp>([&](memref::CopyOp op) {
+          mutatedValues.insert(rootBuffer(op.getTarget()));
+        })
         .Default([&](Operation& op) {});
   });
 }
 
-void PoulpyEmitter::materializeIfPending(Value dst, Value module,
-                                         Value layoutSource,
-                                         bool useSemanticWidth) {
+// An _into op truncates its result to the destination's current width `k()`,
+// so the destination gets the width of `layoutSource`: a fresh buffer is
+// allocated with it, and a buffer the bufferization reuses is reallocated if
+// it is narrower and set to that width otherwise.
+void PoulpyEmitter::materializeDst(Value dst, Value module, Value layoutSource,
+                                   bool useSemanticWidth) {
+  std::string layoutName = variableNames->getNameForValue(layoutSource);
+  std::string width = layoutName + (useSemanticWidth ? ".k()" : ".max_k()");
+  std::string alloc = variableNames->getNameForValue(module) +
+                      ".ckks_ciphertext_alloc(" + layoutName + ".base2k(), " +
+                      width + ")";
+  std::string dstName = variableNames->getNameForValue(dst);
   if (pendingAllocs.erase(dst)) {
-    auto layoutName = variableNames->getNameForValue(layoutSource);
-    os << "let mut " << variableNames->getNameForValue(dst) << " = "
-       << variableNames->getNameForValue(module) << ".ckks_ciphertext_alloc("
-       << layoutName << ".base2k(), " << layoutName
-       << (useSemanticWidth ? ".k()" : ".max_k()") << ");\n";
+    os << "let mut " << dstName << " = " << alloc << ";\n";
+    return;
   }
+  os << "if " << dstName << ".max_k() < " << width << " { "
+     << (isa<BlockArgument>(dst) ? "*" : "") << dstName << " = " << alloc
+     << "; } else { " << dstName << ".set_k(" << width << "); }\n";
 }
 
 // encode, encrypt and decrypt allocate their result: a fresh buffer is bound,
@@ -385,8 +420,8 @@ void PoulpyEmitter::emitCall(Value module, StringRef rustFn, Value dst,
 template <typename OpTy>
 LogicalResult PoulpyEmitter::emitBinaryOp(OpTy op, StringRef rustFn,
                                           ArrayRef<std::string> extraArgs) {
-  materializeIfPending(op.getDst(), op.getModule(), op.getA(),
-                       /*useSemanticWidth=*/false);
+  materializeDst(op.getDst(), op.getModule(), op.getA(),
+                 /*useSemanticWidth=*/false);
 
   SmallVector<std::string> args = {ref(op.getA(), variableNames),
                                    ref(op.getB(), variableNames)};
@@ -460,8 +495,8 @@ LogicalResult PoulpyEmitter::printOperation(NegOp negOp) {
   auto dst = negOp.getDst();
   auto src = negOp.getSrc();
 
-  materializeIfPending(dst, negOp.getModule(), src,
-                       /*useSemanticWidth=*/false);
+  materializeDst(dst, negOp.getModule(), src,
+                 /*useSemanticWidth=*/false);
 
   emitCall(negOp.getModule(), "ckks_neg_into", dst, {ref(src, variableNames)},
            negOp.getScratch());
@@ -484,8 +519,8 @@ LogicalResult PoulpyEmitter::printOperation(RotateOp rotateOp) {
   auto dst = rotateOp.getDst();
   auto src = rotateOp.getSrc();
 
-  materializeIfPending(dst, rotateOp.getModule(), src,
-                       /*useSemanticWidth=*/false);
+  materializeDst(dst, rotateOp.getModule(), src,
+                 /*useSemanticWidth=*/false);
 
   emitCall(rotateOp.getModule(), "ckks_rotate_into", dst,
            {ref(src, variableNames), std::to_string(rotateOp.getK()) + "i64",
@@ -510,8 +545,8 @@ LogicalResult PoulpyEmitter::printOperation(RotateAssignOp rotateAssignOp) {
 
 template <typename OpTy>
 LogicalResult PoulpyEmitter::emitPow2Op(OpTy op, StringRef rustFn) {
-  materializeIfPending(op.getDst(), op.getModule(), op.getSrc(),
-                       /*useSemanticWidth=*/false);
+  materializeDst(op.getDst(), op.getModule(), op.getSrc(),
+                 /*useSemanticWidth=*/false);
 
   emitCall(
       op.getModule(), rustFn, op.getDst(),
@@ -561,8 +596,8 @@ LogicalResult PoulpyEmitter::printOperation(CompactLimbsOp compactLimbsOp) {
 
   // Unlike every other _into op, dst is allocated with the semantic width
   // (.k()), not the allocated capacity (.max_k()).
-  materializeIfPending(dst, compactLimbsOp.getModule(), src,
-                       /*useSemanticWidth=*/true);
+  materializeDst(dst, compactLimbsOp.getModule(), src,
+                 /*useSemanticWidth=*/true);
 
   emitCall(compactLimbsOp.getModule(), "ckks_copy", dst,
            {ref(src, variableNames)}, compactLimbsOp.getScratch());
@@ -812,8 +847,8 @@ LogicalResult PoulpyEmitter::printOperation(memref::AllocOp allocOp) {
 // copy in place, e.g. for an _assign op on an argument that is still live.
 LogicalResult PoulpyEmitter::printOperation(memref::CopyOp copyOp) {
   Value target = copyOp.getTarget();
-  if (isScalarBuffer(target.getType())) {
-    os << variableNames->getNameForValue(target) << ".copy_from_slice("
+  if (isScalarBuffer(rootBuffer(target).getType())) {
+    os << place(target, variableNames) << ".copy_from_slice("
        << ref(copyOp.getSource(), variableNames) << ");\n";
     return success();
   }
@@ -875,6 +910,15 @@ LogicalResult PoulpyEmitter::printOperation(memref::StoreOp op) {
   return success();
 }
 
+// Prints the ops of a region's block but its terminator, which yields nothing.
+LogicalResult PoulpyEmitter::printNestedBlock(Block& block) {
+  os.indent();
+  for (Operation& op : block.without_terminator())
+    if (failed(translate(op))) return failure();
+  os.unindent();
+  return success();
+}
+
 LogicalResult PoulpyEmitter::printOperation(scf::ForOp op) {
   if (op.getNumRegionIterArgs() != 0)
     return op.emitOpError("loop-carried values are not supported");
@@ -882,11 +926,132 @@ LogicalResult PoulpyEmitter::printOperation(scf::ForOp op) {
      << " in (" << variableNames->getNameForValue(op.getLowerBound()) << ".."
      << variableNames->getNameForValue(op.getUpperBound()) << ").step_by("
      << variableNames->getNameForValue(op.getStep()) << " as usize) {\n";
-  os.indent();
-  for (Operation& bodyOp : op.getBody()->without_terminator())
-    if (failed(translate(bodyOp))) return failure();
-  os.unindent();
+  if (failed(printNestedBlock(*op.getBody()))) return failure();
   os << "}\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(scf::IfOp op) {
+  if (op.getNumResults() != 0)
+    return op.emitOpError("results are not supported");
+  os << "if " << variableNames->getNameForValue(op.getCondition()) << " {\n";
+  if (failed(printNestedBlock(op.getThenRegion().front()))) return failure();
+  if (!op.getElseRegion().empty()) {
+    os << "} else {\n";
+    if (failed(printNestedBlock(op.getElseRegion().front()))) return failure();
+  }
+  os << "}\n";
+  return success();
+}
+
+// A contiguous view is printed where it is used, as a range of its buffer.
+LogicalResult PoulpyEmitter::printOperation(memref::SubViewOp op) {
+  if (!isScalarBuffer(rootBuffer(op).getType()) ||
+      !memref::isStaticShapeAndContiguousRowMajor(op.getType()))
+    return op.emitOpError(
+        "expected a contiguous view of a buffer of integers or floats");
+  return success();
+}
+
+// Integer ops wrap like MLIR's. `index` values are held as `usize`, so the
+// signed ops view them as `isize`.
+LogicalResult PoulpyEmitter::printScalarOp(Operation* op) {
+  auto name = [&](Value value) {
+    return variableNames->getNameForValue(value);
+  };
+  auto signedOperand = [&](Value value) {
+    return value.getType().isIndex() ? "(" + name(value) + " as isize)"
+                                     : name(value);
+  };
+  auto unsignedOperand = [&](Value value) {
+    auto intType = dyn_cast<IntegerType>(value.getType());
+    if (!intType || intType.getWidth() == 1) return name(value);
+    return "(" + name(value) + " as u" + std::to_string(intType.getWidth()) +
+           ")";
+  };
+  auto fromSigned = [&](const std::string& expr) {
+    return op->getResult(0).getType().isIndex() ? "(" + expr + ") as usize"
+                                                : expr;
+  };
+  auto infix = [&](StringRef rustOp) {
+    return name(op->getOperand(0)) + " " + rustOp.str() + " " +
+           name(op->getOperand(1));
+  };
+  auto method = [&](StringRef fn) {
+    return name(op->getOperand(0)) + "." + fn.str() + "(" +
+           name(op->getOperand(1)) + ")";
+  };
+
+  FailureOr<std::string> expr =
+      llvm::TypeSwitch<Operation*, FailureOr<std::string>>(op)
+          .Case<arith::AddIOp>([&](auto) { return method("wrapping_add"); })
+          .Case<arith::SubIOp>([&](auto) { return method("wrapping_sub"); })
+          .Case<arith::MulIOp>([&](auto) { return method("wrapping_mul"); })
+          .Case<arith::RemSIOp>([&](auto op) {
+            return fromSigned(signedOperand(op.getLhs()) + " % " +
+                              signedOperand(op.getRhs()));
+          })
+          .Case<arith::FloorDivSIOp>([&](auto op) {
+            return fromSigned(llvm::formatv(
+                "{{ let (a, b) = ({0}, {1}); let q = a / b; if a % b != 0 && "
+                "(a < 0) != (b < 0) {{ q - 1 } else {{ q } }",
+                signedOperand(op.getLhs()), signedOperand(op.getRhs())));
+          })
+          .Case<arith::CmpIOp>([&](arith::CmpIOp op) -> FailureOr<std::string> {
+            using Predicate = arith::CmpIPredicate;
+            Predicate predicate = op.getPredicate();
+            bool isSigned = llvm::is_contained({Predicate::slt, Predicate::sle,
+                                                Predicate::sgt, Predicate::sge},
+                                               predicate);
+            bool isUnsigned =
+                llvm::is_contained({Predicate::ult, Predicate::ule,
+                                    Predicate::ugt, Predicate::uge},
+                                   predicate);
+            if (isSigned && op.getLhs().getType().isInteger(1))
+              return failure();
+            auto operand = [&](Value value) {
+              if (isSigned) return signedOperand(value);
+              if (isUnsigned) return unsignedOperand(value);
+              return name(value);
+            };
+            StringRef rustOp;
+            switch (predicate) {
+              case Predicate::eq:
+                rustOp = "==";
+                break;
+              case Predicate::ne:
+                rustOp = "!=";
+                break;
+              case Predicate::slt:
+              case Predicate::ult:
+                rustOp = "<";
+                break;
+              case Predicate::sle:
+              case Predicate::ule:
+                rustOp = "<=";
+                break;
+              case Predicate::sgt:
+              case Predicate::ugt:
+                rustOp = ">";
+                break;
+              case Predicate::sge:
+              case Predicate::uge:
+                rustOp = ">=";
+                break;
+            }
+            return operand(op.getLhs()) + " " + rustOp.str() + " " +
+                   operand(op.getRhs());
+          })
+          .Case<arith::AddFOp>([&](auto) { return infix("+"); })
+          .Case<arith::SubFOp>([&](auto) { return infix("-"); })
+          .Case<arith::MulFOp>([&](auto) { return infix("*"); })
+          .Case<arith::DivFOp>([&](auto) { return infix("/"); })
+          .Case<math::SqrtOp>([&](math::SqrtOp op) {
+            return name(op.getOperand()) + ".sqrt()";
+          })
+          .Default([](Operation*) { return failure(); });
+  if (failed(expr)) return op->emitOpError("unsupported operand types");
+  os << "let " << name(op->getResult(0)) << " = " << *expr << ";\n";
   return success();
 }
 

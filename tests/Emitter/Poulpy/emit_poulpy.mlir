@@ -250,6 +250,9 @@ func.func @mul_add(%mod: !module, %scratch: !scratch, %tsk: !tsk, %a: !ct, %b: !
   // CHECK-NEXT: let mut [[prod:v[0-9]+]] = [[m]].ckks_ciphertext_alloc([[sum]].base2k(), [[sum]].max_k());
   // CHECK-NEXT: [[m]].ckks_mul_into(&mut [[prod]], &[[sum]], &*[[b]], &*[[tsk]], &mut [[s]].borrow())?;
   poulpy.mul %mod, %prod, %sum, %b, %tsk, %scratch : (!module, !ct, !ct, !ct, !tsk, !scratch) -> ()
+  // A reused destination gets the width a fresh one would: _into ops truncate
+  // their result to it.
+  // CHECK-NEXT: if [[prod]].max_k() < [[sum]].max_k() { [[prod]] = [[m]].ckks_ciphertext_alloc([[sum]].base2k(), [[sum]].max_k()); } else { [[prod]].set_k([[sum]].max_k()); }
   // CHECK-NEXT: [[m]].ckks_mul_into(&mut [[prod]], &[[sum]], &*[[b]], &*[[tsk]], &mut [[s]].borrow())?;
   poulpy.mul %mod, %prod, %sum, %b, %tsk, %scratch : (!module, !ct, !ct, !ct, !tsk, !scratch) -> ()
   // CHECK-NEXT: Ok(())
@@ -590,6 +593,56 @@ func.func @cleartext(%in: memref<2x4xf32>) -> (memref<4xf64>, f32) {
   %first = memref.load %out[%c0] : memref<4xf64>
   %r = arith.truncf %first : f64 to f32
   return %out, %r : memref<4xf64>, f32
+}
+
+// CHECK: pub fn cleartext_arith(
+// CHECK-NEXT: [[i:v[0-9]+]]: usize,
+// CHECK-NEXT: [[j:v[0-9]+]]: i32,
+// CHECK-NEXT: [[x:v[0-9]+]]: f64,
+// CHECK-NEXT: [[buf:v[0-9]+]]: &mut [f32],
+// CHECK-NEXT: [[src:v[0-9]+]]: &[f32],
+// CHECK-NEXT: ) -> Result<(usize, i32, f64, Vec<f32>)> {
+func.func @cleartext_arith(%i: index, %j: i32, %x: f64, %buf: memref<2x4xf32>, %src: memref<4xf32>) -> (index, i32, f64, memref<4xf32>) {
+  // Integer ops wrap like MLIR's.
+  // CHECK-NEXT: let [[sum:v[0-9]+]] = [[i]].wrapping_add([[i]]);
+  // CHECK-NEXT: let [[diff:v[0-9]+]] = [[j]].wrapping_sub([[j]]);
+  // CHECK-NEXT: let [[prod:v[0-9]+]] = [[j]].wrapping_mul([[diff]]);
+  %sum = arith.addi %i, %i : index
+  %diff = arith.subi %j, %j : i32
+  %prod = arith.muli %j, %diff : i32
+  // Signed ops view index values as isize.
+  // CHECK-NEXT: let [[rem:v[0-9]+]] = (([[sum]] as isize) % ([[i]] as isize)) as usize;
+  // CHECK-NEXT: let [[div:v[0-9]+]] = { let (a, b) = ([[prod]], [[j]]); let q = a / b; if a % b != 0 && (a < 0) != (b < 0) { q - 1 } else { q } };
+  // CHECK-NEXT: let [[lt:v[0-9]+]] = ([[rem]] as isize) < ([[i]] as isize);
+  // CHECK-NEXT: let {{v[0-9]+}} = ([[div]] as u32) < ([[j]] as u32);
+  %rem = arith.remsi %sum, %i : index
+  %div = arith.floordivsi %prod, %j : i32
+  %lt = arith.cmpi slt, %rem, %i : index
+  %ult = arith.cmpi ult, %div, %j : i32
+  // CHECK-NEXT: let [[y:v[0-9]+]] = [[x]] * [[x]];
+  // CHECK-NEXT: let [[z:v[0-9]+]] = [[y]].sqrt();
+  %y = arith.mulf %x, %x : f64
+  %z = math.sqrt %y : f64
+  // A contiguous view is a range of its buffer.
+  // CHECK-NEXT: if [[lt]] {
+  // CHECK-NEXT: [[buf]][4..8].copy_from_slice(&*[[src]]);
+  // CHECK-NEXT: } else {
+  // CHECK-NEXT: [[buf]][0..4].copy_from_slice(&*[[src]]);
+  // CHECK-NEXT: }
+  scf.if %lt {
+    %row1 = memref.subview %buf[1, 0] [1, 4] [1, 1] : memref<2x4xf32> to memref<4xf32, strided<[1], offset: 4>>
+    memref.copy %src, %row1 : memref<4xf32> to memref<4xf32, strided<[1], offset: 4>>
+  } else {
+    %row0 = memref.subview %buf[0, 0] [1, 4] [1, 1] : memref<2x4xf32> to memref<4xf32, strided<[1]>>
+    memref.copy %src, %row0 : memref<4xf32> to memref<4xf32, strided<[1]>>
+  }
+  // CHECK-NEXT: let mut [[out:v[0-9]+]] = vec![0f32; 4];
+  // CHECK-NEXT: [[out]].copy_from_slice(&[[buf]][4..8]);
+  %row = memref.subview %buf[1, 0] [1, 4] [1, 1] : memref<2x4xf32> to memref<4xf32, strided<[1], offset: 4>>
+  %out = memref.alloc() : memref<4xf32>
+  memref.copy %row, %out : memref<4xf32, strided<[1], offset: 4>> to memref<4xf32>
+  // CHECK-NEXT: Ok(([[rem]], [[div]], [[z]], [[out]]))
+  return %rem, %div, %z, %out : index, i32, f64, memref<4xf32>
 }
 
 // CHECK: pub fn two_results<BE: PoulpyBackend>(

@@ -13,7 +13,7 @@ heir_lattigo_lib(
         "--mlir-to-ckks=min-slot-count=2048 first-mod-bits=0",
         "--scheme-to-lattigo",
     ],
-    mlir_src = "linalg_dot.mlir",
+    mlir_src = "@heir//tests/Examples/common:linalg_dot.mlir",
 )
 
 go_test(
