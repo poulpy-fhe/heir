@@ -57,6 +57,7 @@
 #include "lib/Dialect/Polynomial/Transforms/Passes.h"
 #include "lib/Dialect/Poulpy/IR/PoulpyDialect.h"
 #include "lib/Dialect/Poulpy/Transforms/BufferizableOpInterfaceImpl.h"
+#include "lib/Dialect/Poulpy/Transforms/ConfigureCryptoContext.h"
 #include "lib/Dialect/Poulpy/Transforms/PoulpyBufferize.h"
 #include "lib/Dialect/Preprocessing/Conversions/PreprocessingToCheddar/PreprocessingToCheddar.h"
 #include "lib/Dialect/Preprocessing/Conversions/PreprocessingToLattigo/PreprocessingToLattigo.h"
@@ -399,6 +400,7 @@ int main(int argc, char** argv) {
   PassPipelineRegistration<>(
       "poulpy-bufferize", "Bufferize poulpy programs with One-Shot Bufferize",
       poulpy::buildPoulpyBufferizationPipeline);
+  poulpy::registerConfigureCryptoContextPasses();
   kernel::registerKernelPasses();
   lattigo::registerLattigoPasses();
   lwe::registerLWEPasses();
@@ -610,6 +612,11 @@ int main(int argc, char** argv) {
       "scheme-to-lattigo",
       "Convert code expressed at FHE scheme level to Lattigo Go code.",
       toLattigoPipelineBuilder());
+
+  PassPipelineRegistration<mlir::heir::BackendOptions>(
+      "scheme-to-poulpy",
+      "Convert code expressed at FHE scheme level to Poulpy Rust code.",
+      toPoulpyPipelineBuilder());
 
   // TODO(#1645): Add backend options for tfhe-rs, fpt, jaxite.
   PassPipelineRegistration<>(

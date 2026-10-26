@@ -9,6 +9,7 @@
 #include "lib/Dialect/Kernel/Transforms/PrepareLinearTransforms.h"
 #include "lib/Dialect/LWE/Conversions/LWEToLattigo/LWEToLattigo.h"
 #include "lib/Dialect/LWE/Conversions/LWEToOpenfhe/LWEToOpenfhe.h"
+#include "lib/Dialect/LWE/Conversions/LWEToPoulpy/LWEToPoulpy.h"
 #include "lib/Dialect/LWE/Transforms/AddDebugPort.h"
 #include "lib/Dialect/LWE/Transforms/AnnotatePlaintextLevel.h"
 #include "lib/Dialect/LWE/Transforms/ImplementTrivialEncryptionAsAddition.h"
@@ -18,6 +19,8 @@
 #include "lib/Dialect/Openfhe/Transforms/ConfigureCryptoContext.h"
 #include "lib/Dialect/Openfhe/Transforms/CountAddAndKeySwitch.h"
 #include "lib/Dialect/Openfhe/Transforms/FastRotationPrecompute.h"
+#include "lib/Dialect/Poulpy/Transforms/ConfigureCryptoContext.h"
+#include "lib/Dialect/Poulpy/Transforms/PoulpyBufferize.h"
 #include "lib/Dialect/Preprocessing/Conversions/PreprocessingToLattigo/PreprocessingToLattigo.h"
 #include "lib/Dialect/Preprocessing/Conversions/PreprocessingToOpenfhe/PreprocessingToOpenfhe.h"
 #include "lib/Dialect/Preprocessing/Transforms/ValidatePreprocessing.h"
@@ -704,6 +707,28 @@ BackendPipelineBuilder toLattigoPipelineBuilder() {
     pm.addPass(createGatherZeroEncryptions());
 
     // Lower Linalg to loops
+    pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
+  };
+}
+
+BackendPipelineBuilder toPoulpyPipelineBuilder() {
+  return [=](OpPassManager& pm, const BackendOptions& options) {
+    addRLWELoweringPasses(pm, options);
+
+    pm.addPass(lwe::createLWEToPoulpy());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+
+    auto configureCryptoContextOptions =
+        poulpy::ConfigureCryptoContextOptions{};
+    configureCryptoContextOptions.entryFunction = options.entryFunction;
+    pm.addPass(
+        poulpy::createConfigureCryptoContext(configureCryptoContextOptions));
+
+    addCleanupPasses(pm);
+
+    prepareForBufferize(pm);
+    poulpy::buildPoulpyBufferizationPipeline(pm);
     pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
   };
 }
