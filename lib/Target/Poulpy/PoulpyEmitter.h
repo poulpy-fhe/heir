@@ -9,8 +9,10 @@
 #include "llvm/include/llvm/ADT/ArrayRef.h"              // from @llvm-project
 #include "llvm/include/llvm/ADT/DenseSet.h"              // from @llvm-project
 #include "llvm/include/llvm/ADT/StringRef.h"             // from @llvm-project
+#include "mlir/include/mlir/Dialect/Arith/IR/Arith.h"    // from @llvm-project
 #include "mlir/include/mlir/Dialect/Func/IR/FuncOps.h"   // from @llvm-project
 #include "mlir/include/mlir/Dialect/MemRef/IR/MemRef.h"  // from @llvm-project
+#include "mlir/include/mlir/Dialect/SCF/IR/SCF.h"        // from @llvm-project
 #include "mlir/include/mlir/IR/BuiltinOps.h"             // from @llvm-project
 #include "mlir/include/mlir/IR/Operation.h"              // from @llvm-project
 #include "mlir/include/mlir/Support/IndentedOstream.h"   // from @llvm-project
@@ -47,8 +49,8 @@ class PoulpyEmitter {
   void computeMutatedValues(func::FuncOp funcOp);
   void materializeIfPending(Value dst, Value module, Value layoutSource,
                             bool useSemanticWidth);
-  LogicalResult checkPendingState(Value dst, Operation* op,
-                                  bool shouldBePending);
+  void emitResultAlloc(Value dst, StringRef allocExpr);
+  LogicalResult checkMaterialized(Value dst, Operation* op);
 
   // Emits a fresh `Source` and returns its name.
   std::string emitSource();
@@ -72,6 +74,13 @@ class PoulpyEmitter {
   LogicalResult printOperation(func::CallOp op);
   LogicalResult printOperation(memref::AllocOp op);
   LogicalResult printOperation(memref::CopyOp op);
+  LogicalResult printOperation(memref::GetGlobalOp op);
+  LogicalResult printOperation(memref::LoadOp op);
+  LogicalResult printOperation(memref::StoreOp op);
+  LogicalResult printOperation(scf::ForOp op);
+  LogicalResult printOperation(arith::ConstantOp op);
+  // Prints a scalar cast: arith.extf, arith.truncf or arith.index_cast.
+  LogicalResult printCast(Operation* op);
   LogicalResult printOperation(ModuleCreateOp op);
   LogicalResult printOperation(ScratchAllocOp op);
   LogicalResult printOperation(ScratchAllocForAllOpsOp op);

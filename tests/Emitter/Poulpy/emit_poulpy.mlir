@@ -522,6 +522,76 @@ func.func @decrypt_check(%m: !module, %s: !scratch, %sk: !sk, %ct: !ct) {
   return
 }
 
+// A buffer reused by the bufferization is reallocated in place.
+// CHECK: pub fn encode_reused_buffer<BE: PoulpyBackend>(
+// CHECK: [[m:v[0-9]+]]: &Module<BE>
+// CHECK: ) -> Result<Pt<BE>>
+func.func @encode_reused_buffer(%m: !module, %s: !scratch, %re: memref<4xf64>, %im: memref<4xf64>) -> !pt {
+  %pt = memref.alloc() : !pt
+  // CHECK: let mut [[pt:v[0-9]+]] = [[m]].ckks_pt_vec_alloc(Base2K(52u32), TorusPrecision(65u32));
+  poulpy.encode %m, %pt, %re, %im, %s <logDelta = 45, logBudget = 20, base2k = 52> : (!module, !pt, memref<4xf64>, memref<4xf64>, !scratch) -> ()
+  // CHECK: {{^ +}}[[pt]] = [[m]].ckks_pt_vec_alloc(Base2K(52u32), TorusPrecision(75u32));
+  poulpy.encode %m, %pt, %re, %im, %s <logDelta = 45, logBudget = 30, base2k = 52> : (!module, !pt, memref<4xf64>, memref<4xf64>, !scratch) -> ()
+  return %pt : !pt
+}
+
+// CHECK: pub fn encrypt_into_argument<BE: PoulpyBackend>(
+// CHECK: [[m:v[0-9]+]]: &Module<BE>
+// CHECK: [[ct:v[0-9]+]]: &mut Ct<BE>
+// CHECK-NEXT: ) -> Result<()>
+func.func @encrypt_into_argument(%m: !module, %s: !scratch, %sk: !sk, %pt: !pt, %ct: !ct) {
+  // CHECK: *[[ct]] = [[m]].ckks_ciphertext_alloc(Base2K(52u32), TorusPrecision(300u32));
+  poulpy.encrypt %m, %ct, %pt, %sk, %s <base2k = 52, ctk = 300> : (!module, !ct, !pt, !sk, !scratch) -> ()
+  return
+}
+
+memref.global "private" constant @splat : memref<4xf64> = dense<0.5>
+memref.global "private" constant @values : memref<2xi32> = dense<[3, -1]>
+
+// Cleartext code, as the client helpers have: buffers are flat row-major
+// vectors.
+// CHECK: pub fn cleartext(
+// CHECK-NEXT: [[in:v[0-9]+]]: &[f32],
+// CHECK-NEXT: ) -> Result<(Vec<f64>, f32)> {
+func.func @cleartext(%in: memref<2x4xf32>) -> (memref<4xf64>, f32) {
+  // CHECK-NEXT: let [[c0:v[0-9]+]] = 0usize;
+  // CHECK-NEXT: let [[c1:v[0-9]+]] = 1usize;
+  // CHECK-NEXT: let [[i0:v[0-9]+]] = 0i32;
+  // CHECK-NEXT: let [[i1:v[0-9]+]] = 1i32;
+  // CHECK-NEXT: let [[i4:v[0-9]+]] = 4i32;
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %i0 = arith.constant 0 : i32
+  %i1 = arith.constant 1 : i32
+  %i4 = arith.constant 4 : i32
+  // CHECK-NEXT: let [[splat:v[0-9]+]] = vec![0.5f64; 4];
+  // CHECK-NEXT: let {{v[0-9]+}} = vec![3i32, -1i32];
+  %splat = memref.get_global @splat : memref<4xf64>
+  %values = memref.get_global @values : memref<2xi32>
+  // CHECK-NEXT: let mut [[out:v[0-9]+]] = vec![0f64; 4];
+  // CHECK-NEXT: [[out]].copy_from_slice(&[[splat]]);
+  %out = memref.alloc() : memref<4xf64>
+  memref.copy %splat, %out : memref<4xf64> to memref<4xf64>
+  // CHECK-NEXT: for [[i:v[0-9]+]] in ([[i0]]..[[i4]]).step_by([[i1]] as usize) {
+  // CHECK-NEXT: let [[j:v[0-9]+]] = [[i]] as usize;
+  // CHECK-NEXT: let [[x:v[0-9]+]] = [[in]]{{\[}}[[c1]] * 4 + [[j]]];
+  // CHECK-NEXT: let [[y:v[0-9]+]] = [[x]] as f64;
+  // CHECK-NEXT: [[out]]{{\[}}[[j]]] = [[y]];
+  // CHECK-NEXT: }
+  scf.for %i = %i0 to %i4 step %i1 : i32 {
+    %j = arith.index_cast %i : i32 to index
+    %x = memref.load %in[%c1, %j] : memref<2x4xf32>
+    %y = arith.extf %x : f32 to f64
+    memref.store %y, %out[%j] : memref<4xf64>
+  }
+  // CHECK-NEXT: let [[first:v[0-9]+]] = [[out]]{{\[}}[[c0]]];
+  // CHECK-NEXT: let [[r:v[0-9]+]] = [[first]] as f32;
+  // CHECK-NEXT: Ok(([[out]], [[r]]))
+  %first = memref.load %out[%c0] : memref<4xf64>
+  %r = arith.truncf %first : f64 to f32
+  return %out, %r : memref<4xf64>, f32
+}
+
 // CHECK: pub fn two_results<BE: PoulpyBackend>(
 // CHECK: [[m:v[0-9]+]]: &Module<BE>
 // CHECK: [[s:v[0-9]+]]: &mut ScratchOwned<BE>

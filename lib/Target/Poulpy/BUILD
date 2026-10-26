@@ -17,7 +17,9 @@ cc_library(
     ],
     deps = [
         "@heir//lib/Analysis/SelectVariableNames",
+        "@heir//lib/Dialect/CKKS/IR:Dialect",
         "@heir//lib/Dialect/Poulpy/IR:Dialect",
+        "@heir//lib/Dialect/TensorExt/IR:Dialect",
         "@heir//lib/Transforms/MemrefToArith:Utils",
         "@heir//lib/Utils:TargetUtils",
         "@llvm-project//llvm:Support",
@@ -28,6 +30,7 @@ cc_library(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TranslateLib",

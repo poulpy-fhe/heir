@@ -75,11 +75,13 @@
 #include "lib/Transforms/ValidateNoise/ValidateNoise.h"
 #include "llvm/include/llvm/Support/CommandLine.h"  // from @llvm-project
 #include "llvm/include/llvm/Support/raw_ostream.h"  // from @llvm-project
+#include "mlir/include/mlir/Conversion/AffineToStandard/AffineToStandard.h"  // from @llvm-project
 #include "mlir/include/mlir/Dialect/Affine/Transforms/Passes.h"  // from @llvm-project
 #include "mlir/include/mlir/Dialect/Linalg/Passes.h"  // from @llvm-project
-#include "mlir/include/mlir/Pass/PassManager.h"       // from @llvm-project
-#include "mlir/include/mlir/Pass/PassOptions.h"       // from @llvm-project
-#include "mlir/include/mlir/Transforms/Passes.h"      // from @llvm-project
+#include "mlir/include/mlir/Dialect/MemRef/Transforms/Passes.h"  // from @llvm-project
+#include "mlir/include/mlir/Pass/PassManager.h"   // from @llvm-project
+#include "mlir/include/mlir/Pass/PassOptions.h"   // from @llvm-project
+#include "mlir/include/mlir/Transforms/Passes.h"  // from @llvm-project
 
 namespace mlir::heir {
 
@@ -730,6 +732,11 @@ BackendPipelineBuilder toPoulpyPipelineBuilder() {
     prepareForBufferize(pm);
     poulpy::buildPoulpyBufferizationPipeline(pm);
     pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
+    // The emitter holds buffers as flat vectors: fold views into the loads
+    // and stores that use them.
+    pm.addPass(memref::createFoldMemRefAliasOpsPass());
+    pm.addPass(createLowerAffinePass());
+    pm.addPass(createCanonicalizerPass());
   };
 }
 

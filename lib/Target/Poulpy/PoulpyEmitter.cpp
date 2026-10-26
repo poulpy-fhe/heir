@@ -1,15 +1,25 @@
 #include "lib/Target/Poulpy/PoulpyEmitter.h"
 
+#include <cmath>
+#include <string>
+
+#include "lib/Dialect/CKKS/IR/CKKSDialect.h"
 #include "lib/Dialect/Poulpy/IR/PoulpyDialect.h"
 #include "lib/Dialect/Poulpy/IR/PoulpyOps.h"
 #include "lib/Dialect/Poulpy/IR/PoulpyTypes.h"
+#include "lib/Dialect/TensorExt/IR/TensorExtDialect.h"
 #include "lib/Target/Poulpy/PoulpyTemplates.h"
 #include "lib/Utils/TargetUtils.h"
 #include "llvm/include/llvm/ADT/STLExtras.h"            // from @llvm-project
 #include "llvm/include/llvm/ADT/TypeSwitch.h"           // from @llvm-project
 #include "llvm/include/llvm/Support/Debug.h"            // from @llvm-project
+#include "llvm/include/llvm/Support/Format.h"           // from @llvm-project
 #include "llvm/include/llvm/Support/FormatVariadic.h"   // from @llvm-project
+#include "mlir/include/mlir/Dialect/Arith/IR/Arith.h"   // from @llvm-project
 #include "mlir/include/mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
+#include "mlir/include/mlir/Dialect/SCF/IR/SCF.h"       // from @llvm-project
+#include "mlir/include/mlir/IR/Builders.h"              // from @llvm-project
+#include "mlir/include/mlir/IR/SymbolTable.h"           // from @llvm-project
 #include "mlir/include/mlir/Tools/mlir-translate/Translation.h"  // from @llvm-project
 #define DEBUG_TYPE "poulpy-emitter"
 
@@ -31,14 +41,66 @@ bool isGenericOverBackend(func::FuncOp funcOp) {
          llvm::any_of(funcOp.getResultTypes(), isPoulpyType);
 }
 
+// The Rust type of an integer, index or float value.
+FailureOr<std::string> scalarType(Type type) {
+  if (type.isIndex()) return std::string("usize");
+  if (type.isInteger(1)) return std::string("bool");
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    unsigned width = intType.getWidth();
+    if (width == 8 || width == 16 || width == 32 || width == 64)
+      return "i" + std::to_string(width);
+  }
+  if (type.isF32()) return std::string("f32");
+  if (type.isF64()) return std::string("f64");
+  return failure();
+}
+
+// A cleartext buffer: a statically shaped, row-major memref of scalars, held
+// as a flat `Vec`.
+bool isScalarBuffer(Type type) {
+  auto memRefType = dyn_cast<MemRefType>(type);
+  return memRefType && memRefType.hasStaticShape() &&
+         memRefType.getLayout().isIdentity() &&
+         succeeded(scalarType(memRefType.getElementType()));
+}
+
+// A Rust literal for an integer or float attribute.
+FailureOr<std::string> literal(Attribute attr) {
+  if (auto floatAttr = dyn_cast<FloatAttr>(attr)) {
+    double value = floatAttr.getValueAsDouble();
+    if (!std::isfinite(value)) return failure();
+    return llvm::formatv("{0}{1}", llvm::format("%.17g", value),
+                         *scalarType(floatAttr.getType()))
+        .str();
+  }
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr) return failure();
+  FailureOr<std::string> type = scalarType(intAttr.getType());
+  if (failed(type)) return failure();
+  if (*type == "bool") return std::string(intAttr.getInt() ? "true" : "false");
+  return std::to_string(intAttr.getValue().getSExtValue()) + *type;
+}
+
+// The row-major offset of `indices` into a buffer of type `type`.
+std::string linearIndex(MemRefType type, ValueRange indices,
+                        SelectVariableNames* variableNames) {
+  SmallVector<std::string> terms;
+  int64_t stride = 1;
+  for (int64_t dim = type.getRank() - 1; dim >= 0; --dim) {
+    std::string term = variableNames->getNameForValue(indices[dim]);
+    if (stride != 1) term += " * " + std::to_string(stride);
+    terms.insert(terms.begin(), term);
+    stride *= type.getDimSize(dim);
+  }
+  return terms.empty() ? "0" : llvm::join(terms, " + ");
+}
+
 std::string valueOrClonedValue(Value value,
                                SelectVariableNames* variableNames) {
   auto expression = variableNames->getNameForValue(value);
   if (isa<BlockArgument>(value)) {
-    // f64 arguments are borrowed slices, the others borrowed poulpy values.
-    auto memRefType = dyn_cast<MemRefType>(value.getType());
-    bool isSlice = memRefType && memRefType.getElementType().isF64();
-    expression += isSlice ? ".to_vec()" : ".clone()";
+    // Buffer arguments are borrowed slices, the others borrowed poulpy values.
+    expression += isScalarBuffer(value.getType()) ? ".to_vec()" : ".clone()";
   }
   return expression;
 }
@@ -77,8 +139,10 @@ void registerToPoulpyTranslation() {
         return translateToPoulpy(op, output);
       },
       [](DialectRegistry& registry) {
-        registry.insert<func::FuncDialect, memref::MemRefDialect,
-                        poulpy::PoulpyDialect>();
+        registry
+            .insert<arith::ArithDialect, ckks::CKKSDialect, func::FuncDialect,
+                    memref::MemRefDialect, poulpy::PoulpyDialect,
+                    scf::SCFDialect, tensor_ext::TensorExtDialect>();
       });
 }
 
@@ -109,8 +173,14 @@ LogicalResult PoulpyEmitter::translate(Operation& op) {
                 CompactLimbsOp, EncodeOp, DecodeOp, EncryptOp, DecryptOp,
                 ModuleCreateOp, ScratchAllocOp, ScratchAllocForAllOpsOp,
                 SecretGenerateOp, SecretKeyPrepareOp, TensorKeyGenerateOp,
-                AutomorphismKeysGenerateOp, memref::AllocOp, memref::CopyOp>(
+                AutomorphismKeysGenerateOp, memref::AllocOp, memref::CopyOp,
+                memref::GetGlobalOp, memref::LoadOp, memref::StoreOp,
+                scf::ForOp, arith::ConstantOp>(
               [&](auto op) { return printOperation(op); })
+          .Case<arith::ExtFOp, arith::TruncFOp, arith::IndexCastOp>(
+              [&](auto op) { return printCast(op); })
+          // Globals are inlined where they are read.
+          .Case<memref::GlobalOp>([&](auto op) { return success(); })
           .Default([&](Operation& op) {
             return op.emitOpError("unable to find printer for op");
           });
@@ -138,10 +208,16 @@ void PoulpyEmitter::computeMutatedValues(func::FuncOp funcOp) {
           mutatedValues.insert(op.getReal());
           mutatedValues.insert(op.getImag());
         })
+        .Case<EncodeOp>(
+            [&](EncodeOp op) { mutatedValues.insert(op.getPlaintext()); })
         .Case<EncryptOp>(
             [&](EncryptOp op) { mutatedValues.insert(op.getCiphertext()); })
         .Case<DecryptOp>(
             [&](DecryptOp op) { mutatedValues.insert(op.getPlaintext()); })
+        .Case<memref::StoreOp>(
+            [&](memref::StoreOp op) { mutatedValues.insert(op.getMemRef()); })
+        .Case<memref::CopyOp>(
+            [&](memref::CopyOp op) { mutatedValues.insert(op.getTarget()); })
         .Default([&](Operation& op) {});
   });
 }
@@ -158,17 +234,21 @@ void PoulpyEmitter::materializeIfPending(Value dst, Value module,
   }
 }
 
-// The _assign ops read-before-write dst, so it must already be materialized.
-// encode, encrypt and decrypt allocate their result themselves, so it must NOT
-// be materialized yet.
-LogicalResult PoulpyEmitter::checkPendingState(Value dst, Operation* op,
-                                               bool shouldBePending) {
-  if (pendingAllocs.contains(dst) == shouldBePending) return success();
+// encode, encrypt and decrypt allocate their result: a fresh buffer is bound,
+// a buffer the bufferization reuses is reassigned.
+void PoulpyEmitter::emitResultAlloc(Value dst, StringRef allocExpr) {
+  std::string name = variableNames->getNameForValue(dst);
+  if (pendingAllocs.erase(dst))
+    os << "let mut " << name;
+  else
+    os << (isa<BlockArgument>(dst) ? "*" : "") << name;
+  os << " = " << allocExpr << ";\n";
+}
 
-  if (shouldBePending) {
-    return op->emitError(
-        "result must come from an unmaterialized memref.alloc");
-  }
+// The _assign ops read-before-write dst, so it must already be materialized.
+LogicalResult PoulpyEmitter::checkMaterialized(Value dst, Operation* op) {
+  if (!pendingAllocs.contains(dst)) return success();
+
   InFlightDiagnostic diag =
       op->emitError("dst has not been initialized before this use");
   diag.attachNote(dst.getLoc()) << "allocated here but never written to first";
@@ -318,8 +398,7 @@ LogicalResult PoulpyEmitter::emitBinaryOp(OpTy op, StringRef rustFn,
 template <typename OpTy>
 LogicalResult PoulpyEmitter::emitBinaryAssignOp(
     OpTy op, StringRef rustFn, ArrayRef<std::string> extraArgs) {
-  if (failed(checkPendingState(op.getDst(), op, /*shouldBePending=*/false)))
-    return failure();
+  if (failed(checkMaterialized(op.getDst(), op))) return failure();
 
   SmallVector<std::string> args = {ref(op.getA(), variableNames)};
   args.append(extraArgs.begin(), extraArgs.end());
@@ -394,8 +473,7 @@ LogicalResult PoulpyEmitter::printOperation(NegOp negOp) {
 LogicalResult PoulpyEmitter::printOperation(NegAssignOp negAssignOp) {
   auto dst = negAssignOp.getDst();
 
-  if (failed(checkPendingState(dst, negAssignOp, /*shouldBePending=*/false)))
-    return failure();
+  if (failed(checkMaterialized(dst, negAssignOp))) return failure();
 
   emitCall(negAssignOp.getModule(), "ckks_neg_assign", dst, {});
 
@@ -420,8 +498,7 @@ LogicalResult PoulpyEmitter::printOperation(RotateOp rotateOp) {
 LogicalResult PoulpyEmitter::printOperation(RotateAssignOp rotateAssignOp) {
   auto dst = rotateAssignOp.getDst();
 
-  if (failed(checkPendingState(dst, rotateAssignOp, /*shouldBePending=*/false)))
-    return failure();
+  if (failed(checkMaterialized(dst, rotateAssignOp))) return failure();
 
   emitCall(rotateAssignOp.getModule(), "ckks_rotate_assign", dst,
            {std::to_string(rotateAssignOp.getK()) + "i64",
@@ -451,9 +528,7 @@ LogicalResult PoulpyEmitter::printOperation(MulPow2Op mulPow2Op) {
 LogicalResult PoulpyEmitter::printOperation(MulPow2AssignOp mulPow2AssignOp) {
   auto dst = mulPow2AssignOp.getDst();
 
-  if (failed(
-          checkPendingState(dst, mulPow2AssignOp, /*shouldBePending=*/false)))
-    return failure();
+  if (failed(checkMaterialized(dst, mulPow2AssignOp))) return failure();
 
   emitCall(mulPow2AssignOp.getModule(), "ckks_mul_pow2_assign", dst,
            {std::to_string(mulPow2AssignOp.getBits()) + "usize"},
@@ -472,9 +547,7 @@ LogicalResult PoulpyEmitter::printOperation(DivPow2Op divPow2Op) {
 LogicalResult PoulpyEmitter::printOperation(DivPow2AssignOp divPow2AssignOp) {
   auto dst = divPow2AssignOp.getDst();
 
-  if (failed(
-          checkPendingState(dst, divPow2AssignOp, /*shouldBePending=*/false)))
-    return failure();
+  if (failed(checkMaterialized(dst, divPow2AssignOp))) return failure();
 
   emitCall(divPow2AssignOp.getModule(), "ckks_div_pow2_assign", dst,
            {std::to_string(divPow2AssignOp.getBits()) + "usize"});
@@ -504,14 +577,13 @@ LogicalResult PoulpyEmitter::printOperation(EncodeOp encodeOp) {
   int64_t logBudget = encodeOp.getLogBudget();
   int64_t base2k = encodeOp.getBase2k();
 
-  if (failed(checkPendingState(plaintext, encodeOp, /*shouldBePending=*/true)))
-    return failure();
-  pendingAllocs.erase(plaintext);
-
   auto ptName = variableNames->getNameForValue(plaintext);
-  os << "let mut " << ptName << " = " << variableNames->getNameForValue(module)
-     << ".ckks_pt_vec_alloc(Base2K(" << base2k << "u32), TorusPrecision("
-     << (logDelta + logBudget) << "u32));\n";
+  emitResultAlloc(plaintext,
+                  llvm::formatv("{0}.ckks_pt_vec_alloc(Base2K({1}u32), "
+                                "TorusPrecision({2}u32))",
+                                variableNames->getNameForValue(module), base2k,
+                                logDelta + logBudget)
+                      .str());
   os << ptName << ".set_meta(CKKSMeta { log_delta: " << logDelta
      << "usize, log_sparsity: 0usize, slots: SlotsKind::Complex });\n";
   emitCall(module, "ckks_encode_reim_into", plaintext,
@@ -540,15 +612,12 @@ LogicalResult PoulpyEmitter::printOperation(EncryptOp encryptOp) {
   uint64_t base2k = encryptOp.getBase2k();
   uint64_t ctK = encryptOp.getCtk();
 
-  if (failed(
-          checkPendingState(ciphertext, encryptOp, /*shouldBePending=*/true)))
-    return failure();
-  pendingAllocs.erase(ciphertext);
-
-  os << "let mut " << variableNames->getNameForValue(ciphertext) << " = "
-     << variableNames->getNameForValue(module)
-     << ".ckks_ciphertext_alloc(Base2K(" << base2k << "u32), TorusPrecision("
-     << ctK << "u32));\n";
+  emitResultAlloc(
+      ciphertext,
+      llvm::formatv("{0}.ckks_ciphertext_alloc(Base2K({1}u32), "
+                    "TorusPrecision({2}u32))",
+                    variableNames->getNameForValue(module), base2k, ctK)
+          .str());
 
   std::string sourceXe = emitSource();
   std::string sourceXa = emitSource();
@@ -566,14 +635,9 @@ LogicalResult PoulpyEmitter::printOperation(DecryptOp decryptOp) {
   auto plaintext = decryptOp.getPlaintext();
   auto ciphertext = decryptOp.getCiphertext();
 
-  if (failed(checkPendingState(plaintext, decryptOp, /*shouldBePending=*/true)))
-    return failure();
-  pendingAllocs.erase(plaintext);
-
-  os << "let mut " << variableNames->getNameForValue(plaintext) << " = "
-     << variableNames->getNameForValue(module)
-     << ".ckks_plaintext_alloc_from_infos(" << ref(ciphertext, variableNames)
-     << ");\n";
+  emitResultAlloc(plaintext, variableNames->getNameForValue(module) +
+                                 ".ckks_plaintext_alloc_from_infos(" +
+                                 ref(ciphertext, variableNames) + ")");
 
   emitCall(module, "ckks_decrypt", plaintext,
            {ref(ciphertext, variableNames),
@@ -724,16 +788,21 @@ LogicalResult PoulpyEmitter::printOperation(AutomorphismKeysGenerateOp op) {
 
 LogicalResult PoulpyEmitter::printOperation(memref::AllocOp allocOp) {
   MemRefType resultType = allocOp.getType();
-  if (resultType.getElementType().isF64()) {
-    // Unlike ciphertext buffers, an f64 vector's size is already known
+  if (isScalarBuffer(resultType)) {
+    // Unlike ciphertext buffers, a cleartext buffer's size is already known
     // statically from the type so we materialize immediately
-    if (resultType.getRank() != 1 || resultType.isDynamicDim(0)) {
-      return allocOp.emitOpError(
-          "unsupported memref shape for f64 alloc (expected static rank-1)");
-    }
+    Type elementType = resultType.getElementType();
     os << "let mut " << variableNames->getNameForValue(allocOp.getResult())
-       << " = vec![0f64; " << resultType.getDimSize(0) << "];\n";
+       << " = vec!["
+       << *literal(Builder(elementType.getContext()).getZeroAttr(elementType))
+       << "; " << resultType.getNumElements() << "];\n";
     return success();
+  }
+  if (resultType.getRank() != 0 ||
+      !isa<CiphertextType, PlaintextType>(resultType.getElementType())) {
+    return allocOp.emitOpError(
+        "unsupported alloc: expected a static memref of integers or floats, "
+        "or a single ciphertext or plaintext");
   }
   pendingAllocs.insert(allocOp.getResult());
   return success();
@@ -743,12 +812,99 @@ LogicalResult PoulpyEmitter::printOperation(memref::AllocOp allocOp) {
 // copy in place, e.g. for an _assign op on an argument that is still live.
 LogicalResult PoulpyEmitter::printOperation(memref::CopyOp copyOp) {
   Value target = copyOp.getTarget();
+  if (isScalarBuffer(target.getType())) {
+    os << variableNames->getNameForValue(target) << ".copy_from_slice("
+       << ref(copyOp.getSource(), variableNames) << ");\n";
+    return success();
+  }
   if (!pendingAllocs.erase(target)) {
     return copyOp.emitOpError(
         "target must come from an unmaterialized memref.alloc");
   }
   os << "let mut " << variableNames->getNameForValue(target) << " = "
      << variableNames->getNameForValue(copyOp.getSource()) << ".clone();\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(memref::GetGlobalOp op) {
+  auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+      op, op.getNameAttr());
+  auto init = dyn_cast_or_null<DenseElementsAttr>(
+      global ? global.getInitialValueAttr() : nullptr);
+  if (!global || !global.getConstant() || !init ||
+      !isScalarBuffer(op.getType())) {
+    return op.emitOpError(
+        "expected a constant global of integers or floats with a dense "
+        "initial value");
+  }
+  std::string values;
+  if (init.isSplat()) {
+    FailureOr<std::string> value = literal(init.getSplatValue<Attribute>());
+    if (failed(value)) return op.emitOpError("unsupported constant value");
+    values = *value + "; " + std::to_string(init.getNumElements());
+  } else {
+    SmallVector<std::string> elements;
+    for (Attribute element : init.getValues<Attribute>()) {
+      FailureOr<std::string> value = literal(element);
+      if (failed(value)) return op.emitOpError("unsupported constant value");
+      elements.push_back(*value);
+    }
+    values = llvm::join(elements, ", ");
+  }
+  os << "let " << variableNames->getNameForValue(op.getResult()) << " = vec!["
+     << values << "];\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(memref::LoadOp op) {
+  if (!isScalarBuffer(op.getMemRefType()))
+    return op.emitOpError("expected a buffer of integers or floats");
+  os << "let " << variableNames->getNameForValue(op.getResult()) << " = "
+     << variableNames->getNameForValue(op.getMemRef()) << "["
+     << linearIndex(op.getMemRefType(), op.getIndices(), variableNames)
+     << "];\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(memref::StoreOp op) {
+  if (!isScalarBuffer(op.getMemRefType()))
+    return op.emitOpError("expected a buffer of integers or floats");
+  os << variableNames->getNameForValue(op.getMemRef()) << "["
+     << linearIndex(op.getMemRefType(), op.getIndices(), variableNames)
+     << "] = " << variableNames->getNameForValue(op.getValueToStore()) << ";\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(scf::ForOp op) {
+  if (op.getNumRegionIterArgs() != 0)
+    return op.emitOpError("loop-carried values are not supported");
+  os << "for " << variableNames->getNameForValue(op.getInductionVar())
+     << " in (" << variableNames->getNameForValue(op.getLowerBound()) << ".."
+     << variableNames->getNameForValue(op.getUpperBound()) << ").step_by("
+     << variableNames->getNameForValue(op.getStep()) << " as usize) {\n";
+  os.indent();
+  for (Operation& bodyOp : op.getBody()->without_terminator())
+    if (failed(translate(bodyOp))) return failure();
+  os.unindent();
+  os << "}\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printOperation(arith::ConstantOp op) {
+  FailureOr<std::string> value = literal(op.getValue());
+  if (failed(value))
+    return op.emitOpError("expected an integer, index or float constant");
+  os << "let " << variableNames->getNameForValue(op.getResult()) << " = "
+     << *value << ";\n";
+  return success();
+}
+
+LogicalResult PoulpyEmitter::printCast(Operation* op) {
+  FailureOr<std::string> type = scalarType(op->getResult(0).getType());
+  if (failed(type)) return op->emitOpError("expected a scalar result");
+  os << "let " << variableNames->getNameForValue(op->getResult(0)) << " = "
+     << variableNames->getNameForValue(op->getOperand(0)) << " as " << *type
+     << ";\n";
   return success();
 }
 
@@ -764,12 +920,10 @@ FailureOr<std::string> PoulpyEmitter::convertType(Type type, bool isArg,
       })
       .Case<MemRefType>([&](MemRefType memRefType) -> FailureOr<std::string> {
         Type elementType = memRefType.getElementType();
-        if (elementType.isF64()) {
-          if (memRefType.getRank() != 1 || memRefType.isDynamicDim(0)) {
-            return failure();
-          }
-          if (!isArg) return std::string("Vec<f64>");
-          return std::string(isMutated ? "&mut [f64]" : "&[f64]");
+        if (isScalarBuffer(memRefType)) {
+          std::string scalar = *scalarType(elementType);
+          if (!isArg) return "Vec<" + scalar + ">";
+          return (isMutated ? "&mut [" : "&[") + scalar + "]";
         }
         if (memRefType.getRank() != 0) return failure();
         if (isa<CiphertextType>(elementType)) {
@@ -795,7 +949,7 @@ FailureOr<std::string> PoulpyEmitter::convertType(Type type, bool isArg,
           [&](AutomorphismKeyMapType) -> FailureOr<std::string> {
             return std::string(isArg ? "&Akm<BE>" : "Akm<BE>");
           })
-      .Default([&](Type&) { return failure(); });
+      .Default([&](Type& type) { return scalarType(type); });
 }
 
 LogicalResult PoulpyEmitter::emitType(Type type, bool isArg, bool isMutated) {
