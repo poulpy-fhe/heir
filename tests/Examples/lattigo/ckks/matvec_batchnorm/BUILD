@@ -12,7 +12,7 @@ heir_lattigo_lib(
         "--torch-linalg-to-ckks=min-slot-count=2048",
         "--scheme-to-lattigo",
     ],
-    mlir_src = "matvec_batchnorm.mlir",
+    mlir_src = "@heir//tests/Examples/common:matvec_batchnorm.mlir",
     split_preprocessing = False,
 )
 

@@ -47,8 +47,8 @@ class PoulpyEmitter {
   int sourceCounter = 0;
 
   void computeMutatedValues(func::FuncOp funcOp);
-  void materializeIfPending(Value dst, Value module, Value layoutSource,
-                            bool useSemanticWidth);
+  void materializeDst(Value dst, Value module, Value layoutSource,
+                      bool useSemanticWidth);
   void emitResultAlloc(Value dst, StringRef allocExpr);
   LogicalResult checkMaterialized(Value dst, Operation* op);
 
@@ -77,7 +77,12 @@ class PoulpyEmitter {
   LogicalResult printOperation(memref::GetGlobalOp op);
   LogicalResult printOperation(memref::LoadOp op);
   LogicalResult printOperation(memref::StoreOp op);
+  LogicalResult printOperation(memref::SubViewOp op);
   LogicalResult printOperation(scf::ForOp op);
+  LogicalResult printOperation(scf::IfOp op);
+  LogicalResult printNestedBlock(Block& block);
+  // Prints integer and float arithmetic, comparisons and math.sqrt.
+  LogicalResult printScalarOp(Operation* op);
   LogicalResult printOperation(arith::ConstantOp op);
   // Prints a scalar cast: arith.extf, arith.truncf or arith.index_cast.
   LogicalResult printCast(Operation* op);

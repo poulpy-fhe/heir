@@ -11,7 +11,7 @@ heir_lattigo_lib(
         "--mlir-to-ckks=min-slot-count=2048",
         "--scheme-to-lattigo",
     ],
-    mlir_src = "pad_dot.mlir",
+    mlir_src = "@heir//tests/Examples/common:pad_dot.mlir",
 )
 
 go_test(

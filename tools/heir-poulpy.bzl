@@ -25,6 +25,8 @@ def heir_poulpy_lib(name, mlir_src, heir_opt_flags, tags = [], **kwargs):
         src = mlir_src,
         pass_flags = heir_opt_flags,
         generated_filename = generated_heir_opt_name,
+        # The emitter inlines constants; it does not load them from files.
+        externalize_constants = False,
         tags = tags,
     )
     heir_translate(
